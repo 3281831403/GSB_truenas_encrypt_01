@@ -1,0 +1,214 @@
+// Copyright TrueNAS 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package user_test
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"testing"
+
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/querycheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
+	"github.com/hashicorp/terraform-plugin-testing/tfversion"
+	"github.com/truenas/terraform-provider-truenas/internal/acctest"
+)
+
+// TestAccUser_basic creates a local user with a password set, checks its
+// attributes, updates full_name and shell in place, imports it by its
+// numeric id (ignoring the write-only password), and verifies destruction.
+func TestAccUser_basic(t *testing.T) {
+	username := acctest.RandName("tf-acc-user")
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(t) },
+		ProtoV6ProviderFactories: acctest.ProtoV6ProviderFactories,
+		CheckDestroy:             testAccCheckUserDestroyed(username),
+		Steps: []resource.TestStep{
+			{
+				Config: acctest.ProviderConfig() + testAccUserConfig(username, "Test User", "/usr/bin/bash"),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("truenas_user.test", "username", username),
+					resource.TestCheckResourceAttr("truenas_user.test", "full_name", "Test User"),
+					resource.TestCheckResourceAttr("truenas_user.test", "shell", "/usr/bin/bash"),
+					resource.TestCheckResourceAttr("truenas_user.test", "home", "/var/empty"),
+					resource.TestCheckResourceAttr("truenas_user.test", "locked", "false"),
+					resource.TestCheckResourceAttrSet("truenas_user.test", "id"),
+					resource.TestCheckResourceAttrSet("truenas_user.test", "uid"),
+				),
+			},
+			// Update in place: change full_name.
+			{
+				Config: acctest.ProviderConfig() + testAccUserConfig(username, "Updated Name", "/usr/bin/bash"),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("truenas_user.test", "full_name", "Updated Name"),
+					resource.TestCheckResourceAttr("truenas_user.test", "shell", "/usr/bin/bash"),
+				),
+			},
+			// Import by the user's numeric id. Password is write-only and
+			// never returned by the API, so it can't be verified.
+			// group_create is also write-only (only sent on create) and is
+			// never read back into state.
+			{
+				ResourceName:            "truenas_user.test",
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"password", "group_create"},
+			},
+		},
+	})
+}
+
+// TestAccUser_identityImport creates a local user and re-imports it using
+// an import block keyed by resource identity (Terraform 1.12+), rather than
+// the legacy `terraform import ID` command.
+//
+// ImportStateVerify is not supported with plannable import blocks
+// (ImportBlockWithID / ImportBlockWithResourceIdentity): terraform-plugin-
+// testing v1.16 rejects that combination outright (see
+// testStepNewImportState's importStatePreconditions, which returns
+// "ImportStateVerify is not supported with plannable import blocks" whenever
+// kind.plannable() && step.ImportStateVerify). For a plannable identity
+// import the framework instead runs a real `terraform plan` right after the
+// import and, unless the step sets ExpectNonEmptyPlan, requires that plan to
+// be a no-op; it also automatically compares the pre- and post-import
+// resource identity values for equality — that is this kind of step's
+// built-in round-trip check.
+//
+// This step sets ExpectNonEmptyPlan: true because that post-import plan is
+// genuinely non-empty here, for the same reason TestAccUser_basic's
+// ImportStateVerifyIgnore lists "group_create": group_create is sent only on
+// create and is never read back from the API, so after import the plan sees
+// it go from unset to the configured value. Several other optional+computed
+// attributes (email, locked, ssh_password_enabled, sshpubkey, sudo_commands,
+// sudo_commands_nopasswd, groups) aren't set in testAccUserConfig either, and
+// the framework's default behavior for an optional+computed attribute with
+// no config value and no UseStateForUnknown plan modifier is to mark it
+// unknown on any plan that isn't a true no-op — which is exactly the
+// documented case for ExpectNonEmptyPlan: "importing a resource that cannot
+// read its entire value back from the remote API." ImportPlanChecks.PreApply
+// below still asserts, explicitly, that the import lands correctly: the plan
+// action is the expected in-place update (not a create/replace/destroy) and
+// the imported username is exactly the one that was created.
+func TestAccUser_identityImport(t *testing.T) {
+	username := acctest.RandName("tf-acc-user-ident")
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(t) },
+		ProtoV6ProviderFactories: acctest.ProtoV6ProviderFactories,
+		TerraformVersionChecks: []tfversion.TerraformVersionCheck{
+			tfversion.SkipBelow(tfversion.Version1_12_0), // ImportBlockWithResourceIdentity requires Terraform 1.12.0+
+		},
+		CheckDestroy: testAccCheckUserDestroyed(username),
+		Steps: []resource.TestStep{
+			{
+				Config: acctest.ProviderConfig() + testAccUserConfig(username, "Identity Test User", "/usr/bin/bash"),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("truenas_user.test", "username", username),
+					resource.TestCheckResourceAttrSet("truenas_user.test", "id"),
+				),
+			},
+			{
+				ResourceName:       "truenas_user.test",
+				ImportState:        true,
+				ImportStateKind:    resource.ImportBlockWithResourceIdentity,
+				ExpectNonEmptyPlan: true, // group_create (and other unread-back computed attrs) diff post-import; see doc comment above
+				ImportPlanChecks: resource.ImportPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("truenas_user.test", plancheck.ResourceActionUpdate),
+						plancheck.ExpectKnownValue("truenas_user.test", tfjsonpath.New("username"), knownvalue.StringExact(username)),
+					},
+				},
+			},
+		},
+	})
+}
+
+// TestAccUser_list creates a local user, then runs a `terraform query`
+// (list resource) step against truenas_user and asserts the query finds at
+// least one result. This exercises internal/listing's StreamCollection path
+// end to end against a live box, rather than the stubbed unit tests in
+// internal/listing/listing_test.go.
+func TestAccUser_list(t *testing.T) {
+	username := acctest.RandName("tf-acc-user-list")
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(t) },
+		ProtoV6ProviderFactories: acctest.ProtoV6ProviderFactories,
+		TerraformVersionChecks: []tfversion.TerraformVersionCheck{
+			tfversion.SkipBelow(tfversion.Version1_14_0), // list/query support requires Terraform 1.14.0+
+		},
+		CheckDestroy: testAccCheckUserDestroyed(username),
+		Steps: []resource.TestStep{
+			{
+				// Ensure at least one truenas_user exists (the box's own
+				// built-in users would satisfy this too, but don't rely on
+				// box-specific state).
+				Config: acctest.ProviderConfig() + testAccUserConfig(username, "List Test User", "/usr/bin/bash"),
+			},
+			{
+				// The Query step's config must NOT redeclare the "truenas"
+				// provider block: WorkingDir.SetQuery only clears stale
+				// *.tfquery.hcl/*.json files, not the *.tf file the prior
+				// step's SetConfig left behind (see terraform-plugin-testing
+				// v1.16's internal/plugintest/working_dir.go SetQuery, which
+				// filters on a ".warioform" extension rather than ".tf").
+				// That leftover file's `provider "truenas" {}` block is still
+				// present on disk when this step runs, so adding
+				// acctest.ProviderConfig() here again produces "Duplicate
+				// provider configuration ... A default (non-aliased)
+				// provider configuration for \"truenas\" was already given".
+				Query: true,
+				Config: `
+list "truenas_user" "test" {
+  provider = truenas
+  config {}
+}
+`,
+				QueryResultChecks: []querycheck.QueryResultCheck{
+					querycheck.ExpectLengthAtLeast("truenas_user.test", 1),
+				},
+			},
+		},
+	})
+}
+
+func testAccUserConfig(username, fullName, shell string) string {
+	return fmt.Sprintf(`
+resource "truenas_user" "test" {
+  username          = %q
+  full_name         = %q
+  password          = "Tf-Acc-Test-Passw0rd!"
+  password_disabled = false
+  home              = "/var/empty"
+  shell             = %q
+  smb               = false
+  group_create      = true
+}
+`, username, fullName, shell)
+}
+
+func testAccCheckUserDestroyed(username string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		c := acctest.Client()
+		raw, err := c.Call(context.Background(), "user.query", [][]any{{"username", "=", username}})
+		if err != nil {
+			return fmt.Errorf("error checking user %s: %v", username, err)
+		}
+		var results []struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &results); err != nil {
+			return fmt.Errorf("error parsing user.query response: %v", err)
+		}
+		if len(results) > 0 {
+			return fmt.Errorf("user %s still exists", username)
+		}
+		return nil
+	}
+}
