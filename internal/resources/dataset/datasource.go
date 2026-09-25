@@ -42,6 +42,7 @@ func (d *DatasetDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 			"volsize":     dschema.Int64Attribute{Computed: true},
 			"mountpoint":  dschema.StringAttribute{Computed: true},
 			"encrypted":   dschema.BoolAttribute{Computed: true},
+			"locked":      dschema.BoolAttribute{Computed: true},
 			"pool":        dschema.StringAttribute{Computed: true},
 		},
 	}

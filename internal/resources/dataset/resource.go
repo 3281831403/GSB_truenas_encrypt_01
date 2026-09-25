@@ -64,6 +64,15 @@ func (r *DatasetResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
+	// A freshly created dataset is always unlocked; lock it if the
+	// configuration asks for a locked dataset.
+	if !plan.Locked.IsNull() && !plan.Locked.IsUnknown() && plan.Locked.ValueBool() {
+		if err := r.lockDataset(ctx, plan.Name.ValueString()); err != nil {
+			resp.Diagnostics.AddError("Lock dataset failed", err.Error())
+			return
+		}
+	}
+
 	// Read back via get_instance for canonical state (create response omits some properties).
 	raw, err := r.client.CallRead(ctx, "pool.dataset.get_instance", plan.Name.ValueString())
 	if err != nil {
@@ -122,13 +131,35 @@ func (r *DatasetResource) Update(ctx context.Context, req resource.UpdateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	var state DatasetModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 
 	payload := plan.updateAPIPayload()
+	if want, changed := encryptionChange(&plan, &state); changed {
+		payload["encryption"] = want
+	}
 
 	_, err := r.client.Call(ctx, "pool.dataset.update", plan.Name.ValueString(), payload)
 	if err != nil {
 		resp.Diagnostics.AddError("Update dataset failed", err.Error())
 		return
+	}
+
+	// Lock state is managed via dedicated API calls, not pool.dataset.update.
+	switch lockAction(&plan, &state) {
+	case "lock":
+		if err := r.lockDataset(ctx, plan.Name.ValueString()); err != nil {
+			resp.Diagnostics.AddError("Lock dataset failed", err.Error())
+			return
+		}
+	case "unlock":
+		if err := r.unlockDataset(ctx, plan.Name.ValueString()); err != nil {
+			resp.Diagnostics.AddError("Unlock dataset failed", err.Error())
+			return
+		}
 	}
 
 	// Re-read to get computed fields
@@ -149,6 +180,20 @@ func (r *DatasetResource) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// lockDataset locks an encrypted dataset via pool.dataset.lock.
+func (r *DatasetResource) lockDataset(ctx context.Context, name string) error {
+	_, err := r.client.Call(ctx, "pool.dataset.lock", name, map[string]any{"force_umount": true})
+	return err
+}
+
+// unlockDataset unlocks an encrypted dataset via pool.dataset.unlock.
+func (r *DatasetResource) unlockDataset(ctx context.Context, name string) error {
+	_, err := r.client.Call(ctx, "pool.dataset.unlock", name, map[string]any{
+		"datasets": []any{map[string]any{"name": name}},
+	})
+	return err
 }
 
 func (r *DatasetResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -203,6 +248,7 @@ func (r *DatasetResource) responseToModel(api *apiResponse, m *DatasetModel) dia
 	m.Type = preserveCase(m.Type, api.Type)
 	m.MountPoint = types.StringValue(api.MountPoint)
 	m.Encrypted = types.BoolValue(api.Encrypted)
+	m.Locked = types.BoolValue(api.Locked)
 	m.Pool = types.StringValue(api.Pool)
 	m.Compression = preserveCase(m.Compression, api.Compression.Parsed)
 	m.AClType = preserveCase(m.AClType, api.AClType.Parsed)

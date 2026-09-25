@@ -56,6 +56,8 @@ resource "truenas_dataset" "media" {
 - `acltype` (String) ACL type: posix, nfsv4, or off. Case-insensitive.
 - `comments` (String) Human-readable description stored as org.freenas:description.
 - `compression` (String) Compression algorithm. Case-insensitive: lz4, zstd, off, etc.
+- `encrypted` (Boolean) Whether the dataset is encrypted. Set true/false to enable or disable encryption; omit to leave it unmanaged.
+- `locked` (Boolean) Whether the dataset is locked. Set true to lock, false to unlock; omit to leave the lock state unmanaged.
 - `quota` (Number) Quota in bytes (0 = unlimited).
 - `refquota` (Number) Referenced quota in bytes (0 = unlimited).
 - `reservation` (Number) Reserved space in bytes.
@@ -65,7 +67,6 @@ resource "truenas_dataset" "media" {
 
 ### Read-Only
 
-- `encrypted` (Boolean) Whether the dataset is encrypted.
 - `id` (String) Dataset name (used as Terraform ID).
 - `mountpoint` (String) Dataset mountpoint path.
 - `pool` (String) Name of the pool containing this dataset.

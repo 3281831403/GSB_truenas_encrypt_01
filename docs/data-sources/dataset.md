@@ -26,6 +26,7 @@ Fetches a TrueNAS dataset by name.
 - `compression` (String)
 - `encrypted` (Boolean)
 - `id` (String) The ID of this resource.
+- `locked` (Boolean)
 - `mountpoint` (String)
 - `pool` (String)
 - `quota` (Number)

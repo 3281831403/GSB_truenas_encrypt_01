@@ -30,6 +30,7 @@ type DatasetModel struct {
 	// Computed
 	MountPoint types.String `tfsdk:"mountpoint"`
 	Encrypted  types.Bool   `tfsdk:"encrypted"`
+	Locked     types.Bool   `tfsdk:"locked"`
 	Pool       types.String `tfsdk:"pool"`
 }
 
@@ -69,7 +70,42 @@ func (m *DatasetModel) apiPayload() map[string]any {
 	if !m.VolSize.IsNull() && !m.VolSize.IsUnknown() && m.VolSize.ValueInt64() != 0 {
 		p["volsize"] = m.VolSize.ValueInt64()
 	}
+	if !m.Encrypted.IsNull() && !m.Encrypted.IsUnknown() {
+		p["encryption"] = m.Encrypted.ValueBool()
+	}
 	return p
+}
+
+// encryptionChange reports whether the planned encryption setting differs
+// from the prior state (and so must be sent to the API), along with the
+// desired value. A null/unknown plan value means "not managed here" and
+// never produces a change.
+func encryptionChange(plan, state *DatasetModel) (want bool, changed bool) {
+	if plan.Encrypted.IsNull() || plan.Encrypted.IsUnknown() {
+		return false, false
+	}
+	want = plan.Encrypted.ValueBool()
+	if state.Encrypted.IsNull() || state.Encrypted.IsUnknown() {
+		return want, true
+	}
+	return want, want != state.Encrypted.ValueBool()
+}
+
+// lockAction returns "lock" or "unlock" when the planned lock state differs
+// from the prior state, or "" when no transition is needed (including when
+// the plan leaves the lock state unmanaged).
+func lockAction(plan, state *DatasetModel) string {
+	if plan.Locked.IsNull() || plan.Locked.IsUnknown() {
+		return ""
+	}
+	want := plan.Locked.ValueBool()
+	if !state.Locked.IsNull() && !state.Locked.IsUnknown() && want == state.Locked.ValueBool() {
+		return ""
+	}
+	if want {
+		return "lock"
+	}
+	return "unlock"
 }
 
 // updateAPIPayload converts the model to the pool.dataset.update JSON
@@ -78,11 +114,16 @@ func (m *DatasetModel) apiPayload() map[string]any {
 // id is passed as the update method's first positional arg, not a payload
 // key) and "type" (changing a dataset's type after creation isn't
 // supported; TrueNAS returns "[EINVAL] data.type: Extra inputs are not
-// permitted" if it's included).
+// permitted" if it's included). It also strips "encryption": the desired
+// encryption setting is only sent when it differs from the prior state
+// (see encryptionChange), so an unchanged setting produces no API change.
 func (m *DatasetModel) updateAPIPayload() map[string]any {
 	p := m.apiPayload()
 	delete(p, "name")
 	delete(p, "type")
+	// "encryption" is only sent when the desired value differs from the
+	// prior state; Update adds it back conditionally via encryptionChange.
+	delete(p, "encryption")
 	return p
 }
 
@@ -94,6 +135,7 @@ type apiResponse struct {
 	Type       string `json:"type"`
 	MountPoint string `json:"mountpoint"`
 	Encrypted  bool   `json:"encrypted"`
+	Locked     bool   `json:"locked"`
 	Pool       string `json:"pool"`
 
 	Compression struct {
