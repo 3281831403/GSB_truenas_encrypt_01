@@ -56,6 +56,8 @@ resource "truenas_dataset" "media" {
 - `acltype` (String) ACL type: posix, nfsv4, or off. Case-insensitive.
 - `comments` (String) Human-readable description stored as org.freenas:description.
 - `compression` (String) Compression algorithm. Case-insensitive: lz4, zstd, off, etc.
+- `encrypted` (Boolean) Whether the dataset is encrypted. ZFS cannot add or remove encryption on an existing dataset, so changing this forces replacement.
+- `locked` (Boolean) Whether the dataset is locked (encryption keys unloaded). Applied in place via pool.dataset.lock/unlock.
 - `quota` (Number) Quota in bytes (0 = unlimited).
 - `refquota` (Number) Referenced quota in bytes (0 = unlimited).
 - `reservation` (Number) Reserved space in bytes.
@@ -65,7 +67,6 @@ resource "truenas_dataset" "media" {
 
 ### Read-Only
 
-- `encrypted` (Boolean) Whether the dataset is encrypted.
 - `id` (String) Dataset name (used as Terraform ID).
 - `mountpoint` (String) Dataset mountpoint path.
 - `pool` (String) Name of the pool containing this dataset.

@@ -5,6 +5,7 @@ package dataset
 
 import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -106,8 +107,21 @@ func resourceSchema() schema.Schema {
 				Description: "Dataset mountpoint path.",
 			},
 			"encrypted": schema.BoolAttribute{
+				Optional:    true,
 				Computed:    true,
-				Description: "Whether the dataset is encrypted.",
+				Description: "Whether the dataset is encrypted. ZFS cannot add or remove encryption on an existing dataset, so changing this forces replacement.",
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.RequiresReplace(),
+					boolplanmodifier.UseStateForUnknown(),
+				},
+			},
+			"locked": schema.BoolAttribute{
+				Optional:    true,
+				Computed:    true,
+				Description: "Whether the dataset is locked (encryption keys unloaded). Applied in place via pool.dataset.lock/unlock.",
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"pool": schema.StringAttribute{
 				Computed:    true,

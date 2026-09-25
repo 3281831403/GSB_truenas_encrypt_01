@@ -64,6 +64,13 @@ func (r *DatasetResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
+	// Converge the lock state with the configuration (new datasets are
+	// created unlocked).
+	resp.Diagnostics.Append(r.reconcileLockState(ctx, plan.Name.ValueString(), plan.Locked)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	// Read back via get_instance for canonical state (create response omits some properties).
 	raw, err := r.client.CallRead(ctx, "pool.dataset.get_instance", plan.Name.ValueString())
 	if err != nil {
@@ -128,6 +135,12 @@ func (r *DatasetResource) Update(ctx context.Context, req resource.UpdateRequest
 	_, err := r.client.Call(ctx, "pool.dataset.update", plan.Name.ValueString(), payload)
 	if err != nil {
 		resp.Diagnostics.AddError("Update dataset failed", err.Error())
+		return
+	}
+
+	// Converge the lock state with the configuration.
+	resp.Diagnostics.Append(r.reconcileLockState(ctx, plan.Name.ValueString(), plan.Locked)...)
+	if resp.Diagnostics.HasError() {
 		return
 	}
 
@@ -203,6 +216,7 @@ func (r *DatasetResource) responseToModel(api *apiResponse, m *DatasetModel) dia
 	m.Type = preserveCase(m.Type, api.Type)
 	m.MountPoint = types.StringValue(api.MountPoint)
 	m.Encrypted = types.BoolValue(api.Encrypted)
+	m.Locked = types.BoolValue(api.Locked)
 	m.Pool = types.StringValue(api.Pool)
 	m.Compression = preserveCase(m.Compression, api.Compression.Parsed)
 	m.AClType = preserveCase(m.AClType, api.AClType.Parsed)
@@ -226,6 +240,52 @@ func (r *DatasetResource) responseToModel(api *apiResponse, m *DatasetModel) dia
 	}
 	m.VolSize = types.Int64Value(api.VolSize.Parsed)
 	return nil
+}
+
+// reconcileLockState converges the dataset's actual lock state with the
+// configured value: it reads the current state via pool.dataset.get_instance
+// and locks or unlocks the dataset when they disagree. A null or unknown
+// configured value means the lock state is not managed and is left as-is.
+func (r *DatasetResource) reconcileLockState(ctx context.Context, name string, configured types.Bool) diag.Diagnostics {
+	var diags diag.Diagnostics
+	if configured.IsNull() || configured.IsUnknown() {
+		return diags
+	}
+
+	raw, err := r.client.CallRead(ctx, "pool.dataset.get_instance", name)
+	if err != nil {
+		diags.AddError("Read dataset lock state failed", err.Error())
+		return diags
+	}
+	var apiResp apiResponse
+	if err := json.Unmarshal(raw, &apiResp); err != nil {
+		diags.AddError("Parse lock state response", err.Error())
+		return diags
+	}
+
+	method, params, ok := lockAction(name, configured.ValueBool(), apiResp.Locked)
+	if !ok {
+		return diags
+	}
+	if _, err := r.client.CallJob(ctx, method, params...); err != nil {
+		diags.AddError("Reconcile dataset lock state failed", err.Error())
+	}
+	return diags
+}
+
+// lockAction maps a (configured, actual) lock-state pair to the TrueNAS API
+// call that converges them. ok is false when the states already agree and no
+// call is needed.
+func lockAction(name string, configured, actual bool) (method string, params []any, ok bool) {
+	if configured == actual {
+		return "", nil, false
+	}
+	if configured {
+		return "pool.dataset.lock", []any{name, map[string]any{"force_umount": true}}, true
+	}
+	return "pool.dataset.unlock", []any{name, map[string]any{
+		"datasets": []any{map[string]any{"name": name}},
+	}}, true
 }
 
 // preserveCase returns current if it matches apiVal case-insensitively (preserving

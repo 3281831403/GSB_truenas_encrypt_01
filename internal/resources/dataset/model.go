@@ -26,6 +26,7 @@ type DatasetModel struct {
 	RefQuota    types.Int64  `tfsdk:"refquota"`
 	Reservation types.Int64  `tfsdk:"reservation"`
 	VolSize     types.Int64  `tfsdk:"volsize"`
+	Locked      types.Bool   `tfsdk:"locked"`
 
 	// Computed
 	MountPoint types.String `tfsdk:"mountpoint"`
@@ -69,6 +70,17 @@ func (m *DatasetModel) apiPayload() map[string]any {
 	if !m.VolSize.IsNull() && !m.VolSize.IsUnknown() && m.VolSize.ValueInt64() != 0 {
 		p["volsize"] = m.VolSize.ValueInt64()
 	}
+	// Encryption is decided at create time (ZFS cannot add or remove
+	// encryption on an existing dataset). Send the configured value
+	// explicitly so the created dataset matches the configuration; when
+	// enabling, inherit_encryption must be disabled or pool.dataset.create
+	// rejects the combination.
+	if !m.Encrypted.IsNull() && !m.Encrypted.IsUnknown() {
+		p["encryption"] = m.Encrypted.ValueBool()
+		if m.Encrypted.ValueBool() {
+			p["inherit_encryption"] = false
+		}
+	}
 	return p
 }
 
@@ -83,6 +95,11 @@ func (m *DatasetModel) updateAPIPayload() map[string]any {
 	p := m.apiPayload()
 	delete(p, "name")
 	delete(p, "type")
+	// pool.dataset.update rejects encryption keys as create-only; toggling
+	// encryption on an existing dataset is handled by replacement, not
+	// in-place update.
+	delete(p, "encryption")
+	delete(p, "inherit_encryption")
 	return p
 }
 
@@ -94,6 +111,7 @@ type apiResponse struct {
 	Type       string `json:"type"`
 	MountPoint string `json:"mountpoint"`
 	Encrypted  bool   `json:"encrypted"`
+	Locked     bool   `json:"locked"`
 	Pool       string `json:"pool"`
 
 	Compression struct {
